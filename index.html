@@ -193,12 +193,22 @@
 
       <div class="row2" style="margin-top:14px">
         <div>
-          <label class="fld">每日蛋白質目標 (g)</label>
+          <label class="fld">蛋白質目標 (g)</label>
           <input class="in" id="tProtein" type="number" inputmode="numeric" placeholder="g" />
         </div>
         <div>
-          <label class="fld">每日熱量目標 (大卡)</label>
+          <label class="fld">熱量目標 (大卡)</label>
           <input class="in" id="tCalorie" type="number" inputmode="numeric" placeholder="kcal" />
+        </div>
+      </div>
+      <div class="row2" style="margin-top:10px">
+        <div>
+          <label class="fld">碳水目標 (g)</label>
+          <input class="in" id="tCarb" type="number" inputmode="numeric" placeholder="g" />
+        </div>
+        <div>
+          <label class="fld">脂肪目標 (g)</label>
+          <input class="in" id="tFat" type="number" inputmode="numeric" placeholder="g" />
         </div>
       </div>
       <p class="hint" id="calcNote"></p>
@@ -256,11 +266,16 @@ function computeTargets(p){
   const tdee = bmr * act;
   const calF = ({ cut:0.8, maintain:1.0, bulk:1.1 })[p.goal] || 1.0;
   const pPerKg = ({ cut:1.8, maintain:1.6, bulk:2.0 })[p.goal] || 1.6;
-  return { calorie: Math.round(tdee*calF), protein: Math.round(p.weight*pPerKg), tdee: Math.round(tdee) };
+  const calorie = Math.round(tdee*calF);
+  const protein = Math.round(p.weight*pPerKg);
+  const fat = Math.round(calorie*0.25/9);                          // 脂肪約佔總熱量 25%
+  const carb = Math.max(0, Math.round((calorie - protein*4 - fat*9)/4)); // 碳水拿剩下的
+  return { calorie, protein, fat, carb, tdee: Math.round(tdee) };
 }
 function effectiveTargets(){
   const p = store.loadProfile();
-  if (p && p.tProtein && p.tCalorie) return { protein:+p.tProtein, calorie:+p.tCalorie };
+  if (p && p.tProtein && p.tCalorie)
+    return { protein:+p.tProtein, calorie:+p.tCalorie, carb:+p.tCarb||0, fat:+p.tFat||0 };
   return null;
 }
 
@@ -287,17 +302,19 @@ function renderToday(){
   const t = effectiveTargets();
   const goals = $('goals');
   if (t){
-    goals.innerHTML =
-      goalBar('蛋白質', protein, t.protein, 'g') +
-      goalBar('熱量', cal, t.calorie, '大卡');
+    let g = goalBar('蛋白質', protein, t.protein, 'g') + goalBar('熱量', cal, t.calorie, '大卡');
+    if (t.carb>0) g += goalBar('碳水', carb, t.carb, 'g');
+    if (t.fat>0)  g += goalBar('脂肪', fat,  t.fat,  'g');
+    goals.innerHTML = g;
+    $('todayMacros').innerHTML = '';
   } else {
     goals.innerHTML = '<p class="hint">到「設定」填個人資料，就會顯示每日目標達成度。</p>';
+    $('todayMacros').innerHTML =
+      '<div><b>'+fmt(protein)+'</b> g 蛋白質</div>' +
+      '<div><b>'+Math.round(cal)+'</b> 大卡</div>' +
+      '<div><b>'+fmt(fat)+'</b> g 脂肪</div>' +
+      '<div><b>'+fmt(carb)+'</b> g 碳水</div>';
   }
-  $('todayMacros').innerHTML =
-    '<div><b>'+fmt(protein)+'</b> g 蛋白質</div>' +
-    '<div><b>'+Math.round(cal)+'</b> 大卡</div>' +
-    '<div><b>'+fmt(fat)+'</b> g 脂肪</div>' +
-    '<div><b>'+fmt(carb)+'</b> g 碳水</div>';
 
   const list = $('todayList');
   if (!items.length){ list.innerHTML = '<div class="empty">還沒記錄，拍一張吧！</div>'; return; }
@@ -397,6 +414,8 @@ function loadSettingsForm(){
     $('goal').value = p.goal || 'maintain';
     $('tProtein').value = p.tProtein || '';
     $('tCalorie').value = p.tCalorie || '';
+    $('tCarb').value = p.tCarb || '';
+    $('tFat').value = p.tFat || '';
   }
 }
 function readProfileForm(){
@@ -412,12 +431,16 @@ $('recalc').onclick = () => {
   const t = computeTargets(p);
   $('tProtein').value = t.protein;
   $('tCalorie').value = t.calorie;
-  $('calcNote').textContent = '依 '+GOAL_LABEL[p.goal]+'：每日消耗約 '+t.tdee+' 大卡 → 目標 '+t.calorie+' 大卡、蛋白質 '+t.protein+' g（可手動微調）';
+  $('tCarb').value = t.carb;
+  $('tFat').value = t.fat;
+  $('calcNote').textContent = '依 '+GOAL_LABEL[p.goal]+'：每日消耗約 '+t.tdee+' 大卡 → 熱量 '+t.calorie+'、蛋白質 '+t.protein+'g、碳水 '+t.carb+'g、脂肪 '+t.fat+'g（可手動微調）';
 };
 $('saveProfile').onclick = () => {
   const p = readProfileForm();
   p.tProtein = +$('tProtein').value || 0;
   p.tCalorie = +$('tCalorie').value || 0;
+  p.tCarb = +$('tCarb').value || 0;
+  p.tFat = +$('tFat').value || 0;
   store.saveProfile(p);
   flash('saveProfile','已儲存 ✓');
   renderToday();
