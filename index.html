@@ -486,7 +486,8 @@ function fileToResizedBase64(file, maxEdge=1024){
 }
 
 /* ---------- Gemini 辨識 ---------- */
-const GEMINI_MODEL = 'gemini-2.5-flash';
+// 多模型備援：主力 2.5-flash 忙線(503)就往後換，全部支援圖片
+const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-1.5-flash'];
 const GEMINI_SCHEMA = {
   type:'OBJECT',
   properties:{ foods:{ type:'ARRAY', items:{ type:'OBJECT', properties:{
@@ -509,21 +510,41 @@ const TEXT_SCHEMA = {
   required:['protein_g','calories_kcal','fat_g','carb_g']
 };
 
-// 共用：POST 給 Gemini、重試、取出回傳的 JSON 物件
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+// 共用：POST 給 Gemini、遇忙線(503/500/429)自動重試+換備援模型、取出回傳的 JSON 物件
 async function geminiCall(body, statusEl){
-  const url = 'https://generativelanguage.googleapis.com/v1beta/models/'+GEMINI_MODEL+':generateContent?key='+encodeURIComponent(store.key);
-  let res, lastErr;
-  for (let a=1;a<=3;a++){
-    try { res = await fetch(url, {method:'POST', headers:{'content-type':'application/json'}, body}); break; }
-    catch(e){ lastErr=e; if(a<3){ if(statusEl) statusEl.innerHTML='<span class="spinner"></span>連線中斷，重試 '+a+'/2…'; await new Promise(r=>setTimeout(r,1200)); } }
+  let lastErr;
+  for (let m = 0; m < GEMINI_MODELS.length; m++){
+    const model = GEMINI_MODELS[m];
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent?key='+encodeURIComponent(store.key);
+    for (let a = 1; a <= 2; a++){
+      let res;
+      try {
+        res = await fetch(url, {method:'POST', headers:{'content-type':'application/json'}, body});
+      } catch(e){
+        lastErr = e;
+        if (statusEl) statusEl.innerHTML = '<span class="spinner"></span>連線中斷，重試…';
+        await sleep(1200); continue;
+      }
+      if (res.ok){
+        const data = await res.json();
+        const text = data.candidates && data.candidates[0] && data.candidates[0].content
+          && data.candidates[0].content.parts && data.candidates[0].content.parts[0] && data.candidates[0].content.parts[0].text;
+        if (!text) throw new Error('Gemini 沒有回傳內容：\n'+JSON.stringify(data).slice(0,400));
+        return JSON.parse(text);
+      }
+      // 非 2xx
+      lastErr = new Error('Gemini 失敗 ('+res.status+')：\n'+(await res.text()));
+      // 503 忙線 / 500 / 429 額度 → 暫時性，重試該模型一次，再不行就換下一個模型
+      if (res.status === 503 || res.status === 500 || res.status === 429){
+        if (statusEl) statusEl.innerHTML = '<span class="spinner"></span>伺服器忙線（'+res.status+'），換模型重試…';
+        await sleep(800); continue;
+      }
+      // 401/400 等（金鑰錯、請求壞）→ 換模型也沒用，直接拋
+      throw lastErr;
+    }
   }
-  if (!res) throw new Error('網路請求失敗（連線不穩或被擋）：'+(lastErr&&lastErr.message||''));
-  if (!res.ok){ throw new Error('Gemini 失敗 ('+res.status+')：\n'+(await res.text())); }
-  const data = await res.json();
-  const text = data.candidates && data.candidates[0] && data.candidates[0].content
-    && data.candidates[0].content.parts && data.candidates[0].content.parts[0] && data.candidates[0].content.parts[0].text;
-  if (!text) throw new Error('Gemini 沒有回傳內容：\n'+JSON.stringify(data).slice(0,400));
-  return JSON.parse(text);
+  throw lastErr || new Error('Gemini 無法連線');
 }
 
 async function recognizeFoods(base64){
