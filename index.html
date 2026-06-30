@@ -93,6 +93,9 @@
   .sheet h2{ margin:0 0 4px; font-size:18px; }
   .sheet .preview{ width:100%; border-radius:12px; margin:10px 0; display:none; }
   .gms{ width:74px; padding:7px; border:1px solid var(--line); border-radius:8px; font-size:14px; text-align:right; }
+  .nm{ width:100%; min-width:62px; padding:7px; border:1px solid var(--line); border-radius:8px; font-size:14px; }
+  .rebtn{ background:none; border:0; font-size:15px; cursor:pointer; padding:4px 4px; }
+  .rebtn:disabled{ opacity:.5; }
   .sumline{ display:flex; justify-content:space-between; align-items:baseline; margin:14px 2px 0; }
   .sumline b{ font-size:22px; color:var(--teal); }
   .twobtn{ display:flex; gap:10px; margin-top:16px; }
@@ -123,6 +126,7 @@
       拍照 / 從相簿選
       <input type="file" id="file" accept="image/*" />
     </button>
+    <button class="save ghost" id="manualBtn" style="margin-top:10px">✏️ 手動輸入食物</button>
     <div class="status" id="status"></div>
 
     <div class="card">
@@ -237,6 +241,21 @@
   <div class="twobtn">
     <button class="save ghost" id="cancelResult">取消</button>
     <button class="save" id="addToday">加入今天</button>
+  </div>
+</div>
+
+<!-- 手動輸入 -->
+<div class="sheet" id="manualSheet">
+  <h2>手動輸入食物</h2>
+  <label class="fld">食物名稱</label>
+  <input class="in" id="mName" type="text" placeholder="例：滷雞腿便當" />
+  <label class="fld">份量 (公克)</label>
+  <input class="in" id="mGrams" type="number" inputmode="decimal" placeholder="g" value="100" />
+  <p class="hint">按下後 AI 會估算營養，接著你還能微調份量或修正名稱。</p>
+  <div class="status" id="mStatus"></div>
+  <div class="twobtn">
+    <button class="save ghost" id="mCancel">取消</button>
+    <button class="save" id="mGo">AI 估算營養</button>
   </div>
 </div>
 
@@ -483,24 +502,47 @@ const PROMPT =
 每一項回傳：name_zh(中文名)、grams(可食重量, 公克)、protein_g(蛋白質克)、calories_kcal(熱量大卡)、fat_g(脂肪克)、carb_g(碳水克)。
 營養值以該 grams 份量計算。只回傳實際辨識到的，不要臆造。`;
 
-async function recognizeFoods(base64){
+// 純文字估算（改名重判 + 手動輸入共用）：給一個食物名 + 份量，回該份量的營養
+const TEXT_SCHEMA = {
+  type:'OBJECT',
+  properties:{ protein_g:{type:'NUMBER'}, calories_kcal:{type:'NUMBER'}, fat_g:{type:'NUMBER'}, carb_g:{type:'NUMBER'} },
+  required:['protein_g','calories_kcal','fat_g','carb_g']
+};
+
+// 共用：POST 給 Gemini、重試、取出回傳的 JSON 物件
+async function geminiCall(body, statusEl){
   const url = 'https://generativelanguage.googleapis.com/v1beta/models/'+GEMINI_MODEL+':generateContent?key='+encodeURIComponent(store.key);
-  const body = JSON.stringify({
-    contents:[{ parts:[ {inline_data:{mime_type:'image/jpeg', data:base64}}, {text:PROMPT} ] }],
-    generationConfig:{ responseMimeType:'application/json', responseSchema:GEMINI_SCHEMA, thinkingConfig:{thinkingBudget:0}, maxOutputTokens:1024 }
-  });
   let res, lastErr;
   for (let a=1;a<=3;a++){
     try { res = await fetch(url, {method:'POST', headers:{'content-type':'application/json'}, body}); break; }
-    catch(e){ lastErr=e; if(a<3){ setStatus('<span class="spinner"></span>連線中斷，重試 '+a+'/2…'); await new Promise(r=>setTimeout(r,1200)); } }
+    catch(e){ lastErr=e; if(a<3){ if(statusEl) statusEl.innerHTML='<span class="spinner"></span>連線中斷，重試 '+a+'/2…'; await new Promise(r=>setTimeout(r,1200)); } }
   }
   if (!res) throw new Error('網路請求失敗（連線不穩或被擋）：'+(lastErr&&lastErr.message||''));
-  if (!res.ok){ throw new Error('Gemini 辨識失敗 ('+res.status+')：\n'+(await res.text())); }
+  if (!res.ok){ throw new Error('Gemini 失敗 ('+res.status+')：\n'+(await res.text())); }
   const data = await res.json();
   const text = data.candidates && data.candidates[0] && data.candidates[0].content
     && data.candidates[0].content.parts && data.candidates[0].content.parts[0] && data.candidates[0].content.parts[0].text;
   if (!text) throw new Error('Gemini 沒有回傳內容：\n'+JSON.stringify(data).slice(0,400));
-  return (JSON.parse(text).foods) || [];
+  return JSON.parse(text);
+}
+
+async function recognizeFoods(base64){
+  const body = JSON.stringify({
+    contents:[{ parts:[ {inline_data:{mime_type:'image/jpeg', data:base64}}, {text:PROMPT} ] }],
+    generationConfig:{ responseMimeType:'application/json', responseSchema:GEMINI_SCHEMA, thinkingConfig:{thinkingBudget:0}, maxOutputTokens:1024 }
+  });
+  return (await geminiCall(body, $('status'))).foods || [];
+}
+
+async function estimateByText(name, grams, statusEl){
+  const prompt = '估算「'+name+'」'+grams+' 公克的營養。依一般營養知識估算，數值以這個份量計算，只回傳數值：'+
+    'protein_g(蛋白質克)、calories_kcal(熱量大卡)、fat_g(脂肪克)、carb_g(碳水克)。';
+  const body = JSON.stringify({
+    contents:[{ parts:[{text:prompt}] }],
+    generationConfig:{ responseMimeType:'application/json', responseSchema:TEXT_SCHEMA, thinkingConfig:{thinkingBudget:0}, maxOutputTokens:256 }
+  });
+  const r = await geminiCall(body, statusEl);
+  return { protein_g:+r.protein_g||0, calories_kcal:+r.calories_kcal||0, fat_g:+r.fat_g||0, carb_g:+r.carb_g||0 };
 }
 
 /* ---------- 辨識流程 + 可微調 ---------- */
@@ -528,29 +570,82 @@ $('file').onchange = async (e) => {
 };
 
 function scaled(item, key){ const g=item.base.grams; return g>0 ? item.base[key]*(item.grams/g) : item.base[key]; }
+function escAttr(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function renderResult(){
   let html='', sp=0, sc=0;
   pending.forEach((it, idx) => {
     const p=scaled(it,'protein_g'), c=scaled(it,'calories_kcal'); sp+=p; sc+=c;
-    html += '<tr><td>'+esc(it.name_zh)+'</td>'+
+    html += '<tr><td><input class="nm" type="text" data-n="'+idx+'" value="'+escAttr(it.name_zh)+'"></td>'+
       '<td class="num"><input class="gms" type="number" inputmode="decimal" data-g="'+idx+'" value="'+Math.round(it.grams)+'"> g</td>'+
       '<td class="num">'+fmt(p)+' g</td><td class="num">'+Math.round(c)+'</td>'+
-      '<td class="num"><button class="xbtn" data-rm="'+idx+'">✕</button></td></tr>';
+      '<td class="num"><button class="rebtn" data-re="'+idx+'" title="改名後讓 AI 重算">🔄</button>'+
+      '<button class="xbtn" data-rm="'+idx+'">✕</button></td></tr>';
   });
   $('resultBody').innerHTML = html;
   $('sumProtein').textContent = fmt(sp)+' g';
   $('sumCal').textContent = Math.round(sc)+' 大卡';
+  $('resultBody').querySelectorAll('[data-n]').forEach(inp => inp.onchange = () => {
+    pending[+inp.dataset.n].name_zh = inp.value;
+  });
   $('resultBody').querySelectorAll('[data-g]').forEach(inp => inp.onchange = () => {
     pending[+inp.dataset.g].grams = +inp.value || 0; renderResult();
   });
+  $('resultBody').querySelectorAll('[data-re]').forEach(b => b.onclick = () => rejudge(+b.dataset.re, b));
   $('resultBody').querySelectorAll('[data-rm]').forEach(b => b.onclick = () => {
     pending.splice(+b.dataset.rm,1); renderResult();
   });
 }
+// 改了食物名 → 按 🔄 → 純文字問 AI 重算該項營養
+async function rejudge(idx, btn){
+  const it = pending[idx];
+  const inp = $('resultBody').querySelector('[data-n="'+idx+'"]');
+  const name = ((inp && inp.value) || it.name_zh || '').trim();
+  if (!name){ alert('請先填食物名稱'); return; }
+  it.name_zh = name;
+  const g = it.grams>0 ? it.grams : 100;
+  if (btn){ btn.disabled=true; btn.textContent='⏳'; }
+  $('err').style.display='none';
+  try {
+    const r = await estimateByText(name, g, $('status'));
+    it.grams = g;
+    it.base = { grams:g, protein_g:r.protein_g, calories_kcal:r.calories_kcal, fat_g:r.fat_g, carb_g:r.carb_g };
+    renderResult();
+  } catch(err){
+    if (btn){ btn.disabled=false; btn.textContent='🔄'; }
+    showErr(err.message || String(err));
+  }
+}
 function openResult(){ renderResult(); $('overlay').style.display='block'; $('sheet').classList.add('open'); }
 function closeResult(){ $('overlay').style.display='none'; $('sheet').classList.remove('open'); }
-$('overlay').onclick = closeResult;
 $('cancelResult').onclick = closeResult;
+
+/* ---------- 手動輸入 ---------- */
+function openManual(){
+  if (!store.key){ alert('請先到「設定」填入 Gemini API Key'); switchTo('settings'); return; }
+  $('mName').value=''; $('mGrams').value='100'; $('mStatus').innerHTML=''; $('mGo').disabled=false;
+  $('overlay').style.display='block'; $('manualSheet').classList.add('open');
+}
+function closeManual(){ $('overlay').style.display='none'; $('manualSheet').classList.remove('open'); }
+$('manualBtn').onclick = openManual;
+$('mCancel').onclick = closeManual;
+$('mGo').onclick = async () => {
+  const name = $('mName').value.trim();
+  const g = +$('mGrams').value || 0;
+  if (!name){ alert('請填食物名稱'); return; }
+  const grams = g>0 ? g : 100;
+  $('err').style.display='none';
+  $('mGo').disabled=true; $('mStatus').innerHTML='<span class="spinner"></span>AI 估算中…';
+  try {
+    const r = await estimateByText(name, grams, $('mStatus'));
+    pending = [{ name_zh:name, grams:grams,
+      base:{ grams:grams, protein_g:r.protein_g, calories_kcal:r.calories_kcal, fat_g:r.fat_g, carb_g:r.carb_g } }];
+    closeManual();
+    openResult();
+  } catch(err){ $('mStatus').innerHTML=''; $('mGo').disabled=false; showErr(err.message || String(err)); }
+};
+
+// 點背景關掉目前開著的 sheet
+$('overlay').onclick = () => { closeResult(); closeManual(); };
 $('addToday').onclick = () => {
   if (!pending.length){ closeResult(); return; }
   const log = store.loadLog(); const k = todayKey();
