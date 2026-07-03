@@ -140,7 +140,7 @@
     <div class="status" id="status"></div>
 
     <div class="card" id="suggestCard" style="display:none">
-      <h2>AI 補足建議</h2>
+      <h2>AI 補足建議 <span style="color:var(--teal);font-size:11px">v2</span></h2>
       <div id="suggestBody"></div>
     </div>
 
@@ -546,10 +546,23 @@ async function geminiCall(body, statusEl){
       }
       if (res.ok){
         const data = await res.json();
-        const text = data.candidates && data.candidates[0] && data.candidates[0].content
-          && data.candidates[0].content.parts && data.candidates[0].content.parts[0] && data.candidates[0].content.parts[0].text;
-        if (!text) throw new Error('Gemini 沒有回傳內容：\n'+JSON.stringify(data).slice(0,400));
-        return JSON.parse(text);
+        const cand = data.candidates && data.candidates[0];
+        const text = cand && cand.content && cand.content.parts && cand.content.parts[0] && cand.content.parts[0].text;
+        const finish = cand && cand.finishReason;
+        if (!text){
+          // 被安全機制擋掉或空回應：換下一個模型再試
+          lastErr = new Error('Gemini 沒有回傳內容'+(finish?'（'+finish+'）':'')+'。');
+          if (statusEl) statusEl.innerHTML = '<span class="spinner"></span>回應異常，換模型重試…';
+          await sleep(400); break; // 跳出重試迴圈 → 換下一個模型
+        }
+        try {
+          return JSON.parse(text);
+        } catch(e){
+          // 回應被截斷(通常 finishReason=MAX_TOKENS)導致 JSON 不完整
+          lastErr = new Error('AI 回應被截斷（'+(finish||'?')+'）。');
+          if (statusEl) statusEl.innerHTML = '<span class="spinner"></span>回應被截斷，換模型重試…';
+          await sleep(400); break; // 換下一個模型再試一次
+        }
       }
       // 非 2xx
       lastErr = new Error('Gemini 失敗 ('+res.status+')：\n'+(await res.text()));
@@ -754,7 +767,7 @@ ${diet ? '飲食偏好／限制（務必遵守，別推薦違反的）：'+diet 
 數值合理估算即可，繁體中文。`;
   const body = JSON.stringify({
     contents:[{ parts:[{text:prompt}] }],
-    generationConfig:{ responseMimeType:'application/json', responseSchema:SUGGEST_SCHEMA, temperature:0.9, thinkingConfig:{thinkingBudget:0}, maxOutputTokens:1024 }
+    generationConfig:{ responseMimeType:'application/json', responseSchema:SUGGEST_SCHEMA, temperature:0.8, thinkingConfig:{thinkingBudget:0}, maxOutputTokens:2048 }
   });
   return await geminiCall(body, $('suggestBody'));
 }
