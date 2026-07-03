@@ -754,7 +754,7 @@ ${diet ? '飲食偏好／限制（務必遵守，別推薦違反的）：'+diet 
 數值合理估算即可，繁體中文。`;
   const body = JSON.stringify({
     contents:[{ parts:[{text:prompt}] }],
-    generationConfig:{ responseMimeType:'application/json', responseSchema:SUGGEST_SCHEMA, temperature:0.9, maxOutputTokens:700 }
+    generationConfig:{ responseMimeType:'application/json', responseSchema:SUGGEST_SCHEMA, temperature:0.9, thinkingConfig:{thinkingBudget:0}, maxOutputTokens:1024 }
   });
   return await geminiCall(body, $('suggestBody'));
 }
