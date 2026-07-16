@@ -96,6 +96,12 @@
   .nm{ width:100%; min-width:62px; padding:7px; border:1px solid var(--line); border-radius:8px; font-size:14px; }
   .rebtn{ background:none; border:0; font-size:15px; cursor:pointer; padding:4px 4px; }
   .rebtn:disabled{ opacity:.5; }
+  .srcrow{ margin-top:4px; }
+  .src{ display:inline-block; font-size:10px; padding:2px 6px; border-radius:6px; white-space:nowrap; }
+  .src.usda{ background:rgba(45,212,191,.15); color:var(--teal); }
+  .src.ai{ background:rgba(148,163,184,.15); color:var(--muted); }
+  .src.label{ background:rgba(250,204,21,.15); color:#facc15; }
+  .src.tog{ cursor:pointer; }
   .sumline{ display:flex; justify-content:space-between; align-items:baseline; margin:14px 2px 0; }
   .sumline b{ font-size:22px; color:var(--teal); }
   .twobtn{ display:flex; gap:10px; margin-top:16px; }
@@ -116,7 +122,7 @@
 </head>
 <body>
 <header>
-  <h1>🍗 蛋白質相機</h1>
+  <h1>🍗 蛋白質相機 <span style="font-size:11px;color:var(--muted);font-weight:400;">v3 · USDA</span></h1>
 </header>
 
 <main>
@@ -169,6 +175,13 @@
       <input class="in" id="geminiKey" type="password" placeholder="貼上你的 key" autocomplete="off" />
       <button class="save" id="saveKey">儲存金鑰</button>
       <p class="hint">免費金鑰：<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>。只存在這支手機，不上傳。</p>
+    </div>
+
+    <div class="card">
+      <h2>USDA 營養校正（選填）</h2>
+      <input class="in" id="usdaKey" type="password" placeholder="貼上 data.gov API Key（不填＝純 AI 估算）" autocomplete="off" />
+      <button class="save" id="saveUsda">儲存 USDA 金鑰</button>
+      <p class="hint">填了以後，辨識完會自動用 <a href="https://fdc.nal.usda.gov/api-key-signup" target="_blank" rel="noopener">USDA 官方營養資料庫</a>（免費）校正原型食物的營養值，比純 AI 估算更準。中式／複合料理配不到時自動保留 AI 值。每項可點標記切回 AI。</p>
     </div>
 
     <div class="card">
@@ -283,6 +296,8 @@ const $ = (id) => document.getElementById(id);
 const store = {
   get key(){ return localStorage.getItem('geminiKey') || ''; },
   set key(v){ localStorage.setItem('geminiKey', v); },
+  get usdaKey(){ return localStorage.getItem('usdaKey') || ''; },
+  set usdaKey(v){ localStorage.setItem('usdaKey', v); },
   loadProfile(){ try { return JSON.parse(localStorage.getItem('profile') || 'null'); } catch(e){ return null; } },
   saveProfile(p){ localStorage.setItem('profile', JSON.stringify(p)); },
   loadLog(){ try { return JSON.parse(localStorage.getItem('log') || '{}'); } catch(e){ return {}; } },
@@ -440,6 +455,7 @@ function drawChart(days, vals, target){
 /* ---------- 設定 ---------- */
 function loadSettingsForm(){
   $('geminiKey').value = store.key;
+  $('usdaKey').value = store.usdaKey;
   const p = store.loadProfile();
   if (p){
     $('sex').value = p.sex || 'male';
@@ -462,6 +478,7 @@ function readProfileForm(){
   };
 }
 $('saveKey').onclick = () => { store.key = $('geminiKey').value.trim(); flash('saveKey','已儲存 ✓'); };
+$('saveUsda').onclick = () => { store.usdaKey = $('usdaKey').value.trim(); flash('saveUsda','已儲存 ✓'); };
 $('recalc').onclick = () => {
   const p = readProfileForm();
   if (!p.age || !p.height || !p.weight){ alert('請先填年齡、身高、體重'); return; }
@@ -509,23 +526,23 @@ const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-
 const GEMINI_SCHEMA = {
   type:'OBJECT',
   properties:{ foods:{ type:'ARRAY', items:{ type:'OBJECT', properties:{
-    name_zh:{type:'STRING'}, grams:{type:'NUMBER'}, protein_g:{type:'NUMBER'},
-    calories_kcal:{type:'NUMBER'}, fat_g:{type:'NUMBER'}, carb_g:{type:'NUMBER'}
-  }, required:['name_zh','grams','protein_g','calories_kcal','fat_g','carb_g'] } } },
+    name_zh:{type:'STRING'}, name_en:{type:'STRING'}, grams:{type:'NUMBER'}, protein_g:{type:'NUMBER'},
+    calories_kcal:{type:'NUMBER'}, fat_g:{type:'NUMBER'}, carb_g:{type:'NUMBER'}, from_label:{type:'BOOLEAN'}
+  }, required:['name_zh','name_en','grams','protein_g','calories_kcal','fat_g','carb_g'] } } },
   required:['foods']
 };
 const PROMPT =
 `你是營養辨識助手。判斷這張照片：
-- 若是「食物照片」：列出每種食物，依營養知識估算份量與營養。
-- 若是「包裝營養標示／份量表」：直接讀取上面印的數值（以一份/該包的份量為準），不要自己估。
-每一項回傳：name_zh(中文名)、grams(可食重量, 公克)、protein_g(蛋白質克)、calories_kcal(熱量大卡)、fat_g(脂肪克)、carb_g(碳水克)。
+- 若是「食物照片」：列出每種食物，依營養知識估算份量與營養，from_label 設 false。
+- 若是「包裝營養標示／份量表」：直接讀取上面印的數值（以一份/該包的份量為準），不要自己估，from_label 設 true。
+每一項回傳：name_zh(中文名)、name_en(對應的英文食物名，越接近 USDA FoodData Central 常見寫法越好，例如「egg, whole, raw」「chicken breast, cooked」；複合料理給主成分英文名)、grams(可食重量, 公克)、protein_g(蛋白質克)、calories_kcal(熱量大卡)、fat_g(脂肪克)、carb_g(碳水克)、from_label(是否讀自營養標示)。
 營養值以該 grams 份量計算。只回傳實際辨識到的，不要臆造。`;
 
-// 純文字估算（改名重判 + 手動輸入共用）：給一個食物名 + 份量，回該份量的營養
+// 純文字估算（改名重判 + 手動輸入共用）：給一個食物名 + 份量，回該份量的營養 + 英文名（USDA 查詢用）
 const TEXT_SCHEMA = {
   type:'OBJECT',
-  properties:{ protein_g:{type:'NUMBER'}, calories_kcal:{type:'NUMBER'}, fat_g:{type:'NUMBER'}, carb_g:{type:'NUMBER'} },
-  required:['protein_g','calories_kcal','fat_g','carb_g']
+  properties:{ name_en:{type:'STRING'}, protein_g:{type:'NUMBER'}, calories_kcal:{type:'NUMBER'}, fat_g:{type:'NUMBER'}, carb_g:{type:'NUMBER'} },
+  required:['name_en','protein_g','calories_kcal','fat_g','carb_g']
 };
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -587,14 +604,73 @@ async function recognizeFoods(base64){
 }
 
 async function estimateByText(name, grams, statusEl){
-  const prompt = '估算「'+name+'」'+grams+' 公克的營養。依一般營養知識估算，數值以這個份量計算，只回傳數值：'+
+  const prompt = '估算「'+name+'」'+grams+' 公克的營養。依一般營養知識估算，數值以這個份量計算，回傳：'+
+    'name_en(對應的英文食物名，越接近 USDA FoodData Central 常見寫法越好，例如「egg, whole, raw」)、'+
     'protein_g(蛋白質克)、calories_kcal(熱量大卡)、fat_g(脂肪克)、carb_g(碳水克)。';
   const body = JSON.stringify({
     contents:[{ parts:[{text:prompt}] }],
     generationConfig:{ responseMimeType:'application/json', responseSchema:TEXT_SCHEMA, thinkingConfig:{thinkingBudget:0}, maxOutputTokens:256 }
   });
   const r = await geminiCall(body, statusEl);
-  return { protein_g:+r.protein_g||0, calories_kcal:+r.calories_kcal||0, fat_g:+r.fat_g||0, carb_g:+r.carb_g||0 };
+  return { name_en:r.name_en||'', protein_g:+r.protein_g||0, calories_kcal:+r.calories_kcal||0, fat_g:+r.fat_g||0, carb_g:+r.carb_g||0 };
+}
+
+/* ---------- USDA FoodData Central 校正 ---------- */
+// USDA 各營養素的 nutrientId（每 100g 基準）
+const USDA_N = { protein:1003, kcal:1008, kcal2:2047, kcal3:2048, fat:1004, carb:1005 };
+// 查 USDA、回每 100g 的四大營養素 + 匹配到的食物描述；查無/沒 key/失敗 → null
+async function usdaLookup(nameEn){
+  const key = store.usdaKey;
+  if (!key || !nameEn) return null;
+  const url = 'https://api.nal.usda.gov/fdc/v1/foods/search?query=' + encodeURIComponent(nameEn)
+    + '&pageSize=1&dataType=' + encodeURIComponent('Foundation,SR Legacy')
+    + '&api_key=' + encodeURIComponent(key);
+  let res;
+  try { res = await fetch(url); } catch(e){ return null; }
+  if (!res.ok) return null;
+  let data; try { data = await res.json(); } catch(e){ return null; }
+  const f = data.foods && data.foods[0];
+  if (!f) return null;
+  const byId = {};
+  (f.foodNutrients||[]).forEach(n => { if (n.value != null) byId[n.nutrientId] = n.value; });
+  const kcal = byId[USDA_N.kcal] != null ? byId[USDA_N.kcal]
+    : (byId[USDA_N.kcal2] != null ? byId[USDA_N.kcal2] : byId[USDA_N.kcal3]);
+  if (byId[USDA_N.protein] == null && kcal == null) return null; // 沒有可用數值
+  return {
+    desc: f.description, fdcId: f.fdcId,
+    per100: {
+      protein_g: +byId[USDA_N.protein] || 0,
+      calories_kcal: +kcal || 0,
+      fat_g: +byId[USDA_N.fat] || 0,
+      carb_g: +byId[USDA_N.carb] || 0
+    }
+  };
+}
+// 依 it.src 把 it.base 設成該來源、以「當前 grams」為基準的營養
+function applySrc(it){
+  if (it.src === 'usda' && it.usda){
+    const p = it.usda.per100, g = it.grams;
+    it.base = { grams:100, protein_g:p.protein_g, calories_kcal:p.calories_kcal, fat_g:p.fat_g, carb_g:p.carb_g };
+  } else {
+    it.base = Object.assign({}, it.aiBase);
+    it.src = 'ai';
+  }
+}
+// 對一個 pending 項目查 USDA；查到就掛上 it.usda 並切成 usda 來源
+async function correctItem(it){
+  if (!store.usdaKey || it.fromLabel || !it.name_en) return;
+  const u = await usdaLookup(it.name_en);
+  if (u){ it.usda = u; it.src = 'usda'; applySrc(it); }
+}
+// 批次自動校正（辨識/手動/改名後呼叫），完成後重繪
+async function autoCorrect(statusEl){
+  if (!store.usdaKey) return;
+  const todo = pending.filter(it => !it.fromLabel && !it.usda && it.name_en);
+  if (!todo.length) return;
+  if (statusEl) statusEl.innerHTML = '<span class="spinner"></span>USDA 資料庫校正中…';
+  await Promise.all(todo.map(it => correctItem(it).catch(()=>{})));
+  if (statusEl) statusEl.innerHTML = '';
+  renderResult();
 }
 
 /* ---------- 辨識流程 + 可微調 ---------- */
@@ -615,19 +691,35 @@ $('file').onchange = async (e) => {
     const foods = await recognizeFoods(base64);
     setStatus('');
     if (!foods.length){ showErr('沒有辨識到食物，換個角度再拍一次試試。'); return; }
-    pending = foods.map(f => ({ name_zh:f.name_zh, grams:f.grams,
-      base:{ grams:f.grams, protein_g:f.protein_g, calories_kcal:f.calories_kcal, fat_g:f.fat_g, carb_g:f.carb_g } }));
+    pending = foods.map(f => {
+      const aiBase = { grams:f.grams, protein_g:f.protein_g, calories_kcal:f.calories_kcal, fat_g:f.fat_g, carb_g:f.carb_g };
+      return { name_zh:f.name_zh, name_en:f.name_en||'', grams:f.grams,
+        fromLabel:!!f.from_label, src:'ai', usda:null, aiBase:aiBase, base:Object.assign({}, aiBase) };
+    });
     openResult();
+    autoCorrect($('status'));
   } catch(err){ setStatus(''); showErr(err.message || String(err)); }
 };
 
 function scaled(item, key){ const g=item.base.grams; return g>0 ? item.base[key]*(item.grams/g) : item.base[key]; }
 function escAttr(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+// 來源標記：📊 USDA 校正 / 🤖 AI 估算 / 🏷️ 標示直讀，有 USDA 資料時可點切換
+function srcBadge(it, idx){
+  if (it.fromLabel) return '<span class="src label" title="讀自營養標示，未校正">🏷️ 標示</span>';
+  if (it.usda){
+    return it.src === 'usda'
+      ? '<span class="src usda tog" data-tog="'+idx+'" title="USDA：'+escAttr(it.usda.desc)+'（點一下切回 AI 估算）">📊 USDA 校正</span>'
+      : '<span class="src ai tog" data-tog="'+idx+'" title="點一下改用 USDA：'+escAttr(it.usda.desc)+'">🤖 AI 估算</span>';
+  }
+  if (store.usdaKey && it.name_en) return '<span class="src ai tog" data-look="'+idx+'" title="點一下查 USDA 校正">🤖 AI 估算 · 查USDA</span>';
+  return '<span class="src ai" title="AI 估算值">🤖 AI 估算</span>';
+}
 function renderResult(){
   let html='', sp=0, sc=0;
   pending.forEach((it, idx) => {
     const p=scaled(it,'protein_g'), c=scaled(it,'calories_kcal'); sp+=p; sc+=c;
-    html += '<tr><td><input class="nm" type="text" data-n="'+idx+'" value="'+escAttr(it.name_zh)+'"></td>'+
+    html += '<tr><td><input class="nm" type="text" data-n="'+idx+'" value="'+escAttr(it.name_zh)+'">'+
+      '<div class="srcrow">'+srcBadge(it, idx)+'</div></td>'+
       '<td class="num"><input class="gms" type="number" inputmode="decimal" data-g="'+idx+'" value="'+Math.round(it.grams)+'"> g</td>'+
       '<td class="num">'+fmt(p)+' g</td><td class="num">'+Math.round(c)+'</td>'+
       '<td class="num"><button class="rebtn" data-re="'+idx+'" title="改名後讓 AI 重算">🔄</button>'+
@@ -646,6 +738,20 @@ function renderResult(){
   $('resultBody').querySelectorAll('[data-rm]').forEach(b => b.onclick = () => {
     pending.splice(+b.dataset.rm,1); renderResult();
   });
+  // 點來源標記：切換 AI ↔ USDA
+  $('resultBody').querySelectorAll('[data-tog]').forEach(b => b.onclick = () => {
+    const it = pending[+b.dataset.tog];
+    it.src = (it.src === 'usda') ? 'ai' : 'usda';
+    applySrc(it); renderResult();
+  });
+  // 點「查USDA」：對還沒查過的項目按需查一次
+  $('resultBody').querySelectorAll('[data-look]').forEach(b => b.onclick = async () => {
+    const it = pending[+b.dataset.look];
+    b.textContent = '🔍 查詢中…';
+    await correctItem(it).catch(()=>{});
+    if (!it.usda){ b.textContent = '🤖 AI 估算 · 查無'; }
+    renderResult();
+  });
 }
 // 改了食物名 → 按 🔄 → 純文字問 AI 重算該項營養
 async function rejudge(idx, btn){
@@ -660,7 +766,12 @@ async function rejudge(idx, btn){
   try {
     const r = await estimateByText(name, g, $('status'));
     it.grams = g;
-    it.base = { grams:g, protein_g:r.protein_g, calories_kcal:r.calories_kcal, fat_g:r.fat_g, carb_g:r.carb_g };
+    it.name_en = r.name_en || '';
+    it.usda = null; it.src = 'ai';                       // 名稱變了，舊 USDA 配對失效，重查
+    it.aiBase = { grams:g, protein_g:r.protein_g, calories_kcal:r.calories_kcal, fat_g:r.fat_g, carb_g:r.carb_g };
+    it.base = Object.assign({}, it.aiBase);
+    renderResult();
+    await correctItem(it).catch(()=>{});                // 重新校正該項
     renderResult();
   } catch(err){
     if (btn){ btn.disabled=false; btn.textContent='🔄'; }
@@ -689,10 +800,12 @@ $('mGo').onclick = async () => {
   $('mGo').disabled=true; $('mStatus').innerHTML='<span class="spinner"></span>AI 估算中…';
   try {
     const r = await estimateByText(name, grams, $('mStatus'));
-    pending = [{ name_zh:name, grams:grams,
-      base:{ grams:grams, protein_g:r.protein_g, calories_kcal:r.calories_kcal, fat_g:r.fat_g, carb_g:r.carb_g } }];
+    const aiBase = { grams:grams, protein_g:r.protein_g, calories_kcal:r.calories_kcal, fat_g:r.fat_g, carb_g:r.carb_g };
+    pending = [{ name_zh:name, name_en:r.name_en||'', grams:grams,
+      fromLabel:false, src:'ai', usda:null, aiBase:aiBase, base:Object.assign({}, aiBase) }];
     closeManual();
     openResult();
+    autoCorrect($('status'));
   } catch(err){ $('mStatus').innerHTML=''; $('mGo').disabled=false; showErr(err.message || String(err)); }
 };
 
