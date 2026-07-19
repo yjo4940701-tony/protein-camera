@@ -122,7 +122,7 @@
 </head>
 <body>
 <header>
-  <h1>🍗 蛋白質相機 <span style="font-size:11px;color:var(--muted);font-weight:400;">v3 · USDA</span></h1>
+  <h1>🍗 蛋白質相機 <span style="font-size:11px;color:var(--muted);font-weight:400;">v4 · USDA</span></h1>
 </header>
 
 <main>
@@ -636,15 +636,16 @@ async function usdaLookup(nameEn){
   const kcal = byId[USDA_N.kcal] != null ? byId[USDA_N.kcal]
     : (byId[USDA_N.kcal2] != null ? byId[USDA_N.kcal2] : byId[USDA_N.kcal3]);
   if (byId[USDA_N.protein] == null && kcal == null) return null; // 沒有可用數值
-  return {
-    desc: f.description, fdcId: f.fdcId,
-    per100: {
-      protein_g: +byId[USDA_N.protein] || 0,
-      calories_kcal: +kcal || 0,
-      fat_g: +byId[USDA_N.fat] || 0,
-      carb_g: +byId[USDA_N.carb] || 0
-    }
+  const per100 = {
+    protein_g: +byId[USDA_N.protein] || 0,
+    calories_kcal: +kcal || 0,
+    fat_g: +byId[USDA_N.fat] || 0,
+    carb_g: +byId[USDA_N.carb] || 0
   };
+  // 四大營養素全 0：多半是複合飲料/料理（如奶茶）被配到「茶、水」這類原型，
+  // 校正會把 AI 估算整個歸零 → 視為查無、保留 AI 估算值
+  if (!per100.protein_g && !per100.calories_kcal && !per100.fat_g && !per100.carb_g) return null;
+  return { desc: f.description, fdcId: f.fdcId, per100 };
 }
 // 依 it.src 把 it.base 設成該來源、以「當前 grams」為基準的營養
 function applySrc(it){
